@@ -40,7 +40,6 @@ def main():
   parser.add_argument("-e", "--epochs", help="number of epochs", type=int, default=10000)
   parser.add_argument("-t", "--trials", type=int, default=20)
   parser.add_argument("--save_models", help="save models in results-dir", action="store_true")
-  parser.add_argument("--anneal_lr", help="reduce lr from max to 0 throughout learning", action="store_true")
   parser.add_argument("--filename", help="name of save file", default="out.txt")
   parser.add_argument("result_dir", help="path to save results plots")
   parser.add_argument("--degrees_of_freedom", help="degrees of freedom for nd cartpole environment: standard 2D cartpole has 1 dof", type=int, default=1)
@@ -60,7 +59,6 @@ def main():
   # OUTER HYPERPARAMETERS
   lr = 2.5e-4
   num_epochs = args.epochs
-  episodes = 10 # Number of episodes to perform for each outer iteration
   rollout_len = 200 # number of steps to take in the envs per rollout
   policy_epochs = args.policy_epochs
   rl_batch_size = 512 # Batch size can work with a wide range of values
@@ -75,9 +73,7 @@ def main():
     
   adam_eps = 1e-5 # default parameter is 1e-8
 
-
   reward_threshold = 500
-
 
   ## LISTS FOR PERFORMANCE ANALYSIS ##
   # OUTER STATISTICS
@@ -140,8 +136,6 @@ def main():
           ### PPO OUTER TRAINING ###
           # Gather data with first net only!
           if gather_data:
-            memory = []
-            epoch_rewards = []
             rollout_rewards, last_state, last_done = perform_rollout(policy_network, value_network, env, rollout, rollout_len, last_state)
             
             general_advantage_estimation(value_network, rollout, last_state, last_done, gamma, gae_lambda)
@@ -154,11 +148,6 @@ def main():
             memory_iter = iter(memory_dataloader)
             transition = next(memory_iter)
             reset_iter = False
-    
-          # Anneal lr
-          if args.anneal_lr:
-            frac = 1.0 - (step - 1) / num_steps
-            policy_optimizer.param_groups[0]['lr'] = frac * lr
     
           # Calculate and accumulate losses
           policy_loss, value_loss, entropy_loss = calculate_losses(policy_network, value_network, transition, epsilon)

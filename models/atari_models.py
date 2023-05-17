@@ -75,7 +75,7 @@ class Encoder(nn.Module):
 
 # Policy Gradient Architectures
 class Actor(nn.Module): # an actor-critic neural network
-    def __init__(self, state_channels, num_actions, simplify=False):
+    def __init__(self, state_channels, num_actions):
         super(Actor, self).__init__()
 
         self.convs = nn.Sequential(
@@ -86,9 +86,10 @@ class Actor(nn.Module): # an actor-critic neural network
           layer_init(nn.Conv2d(64, 64, 3, stride=1)),
           nn.ReLU()
         )
-        h, w = (4,6) if simplify else (7,7) 
+        # h, w = (7,7) # w/ Atari preprocesing wrapper, the size will be 7x7 here
         self.head = nn.Sequential(
-          layer_init(nn.Linear(64*h*w, 512)),
+          # layer_init(nn.Linear(64*h*w, 512)),
+          layer_init(nn.Linear(3136, 512)), #3136 = 64*7*7
           nn.ReLU(),
           layer_init(nn.Linear(512, num_actions), std=.01)
         )
