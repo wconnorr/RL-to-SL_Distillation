@@ -1,0 +1,1 @@
+state_pong_l3.ckpt is a lightning fabric checkpoint file. It contains a dictionary with ['distiller_sd']. The lightning fabric format is used in more recent experiments with parallelization.
