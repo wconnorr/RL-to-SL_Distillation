@@ -29,6 +29,8 @@ The stored distilled datasets use the following naming scheme:
 - Atari - Atari/\<ENV_NAME\>/distiller_sd_\<env_name\>_<ENCODER_LEVEL>.pt OR Atari/\<ENV_NAME\>/state_\<env_name\>_<ENCODER_LEVEL>.ckpt, ENCODER_LEVEL is an integer \[1,4\] showing which layer the encoder/learner split is. See Section 5.1 of the paper for further details. These are only the minimum-sized distillations, recorded in Table 2 of the paper.
 - MuJoCo -  MuJoCo/\<env_name\>_b64_state.ckpt. See Table 4 of the paper for results.
 
+For any that have both a .pt and .ckpt file, the .ckpt was used in the final paper, while the .pt represents an earlier version.
+
 ---
 
 ### Citation
