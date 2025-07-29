@@ -1,51 +1,28 @@
+"""
+Models uses in cart-pole validation to test k-shot learning and the distillation's generalization to various learner initializations.
+"""
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from torch.utils.data import Dataset
 
 
 # ACTION SPACE: steer cart [left, right]
+ACTION_SPACE = 2
 # STATE SPACE:  [x_cart, vx_cart, theta_pole_, vtheta_pole] (not necessarily in that order)
+STATE_SPACE  = 4
 
 # Generator Architectures
-
-# GTN-style generator to produce the teaching data
-class GTNGenerator(nn.Module):
-  def __init__(self, z_vector_size, state_size, action_size, inner_lr=.02, inner_momentum=.5, conditional_generation=True):
-    super(GTNGenerator, self).__init__()
-
-    self.input_size = z_vector_size + (action_size if conditional_generation else 0)
-    self.conditional_generation = conditional_generation
-    hidden_size = z_vector_size * 2
-    
-    self.l1 = nn.Linear(self.input_size, hidden_size)
-    self.relu = nn.ReLU()
-    self.state_head = nn.Linear(hidden_size, state_size)
-    if not conditional_generation:
-      self.action_head = nn.Linear(hidden_size, action_size)
-
-    # Inner optimizer parameters
-    if inner_lr is not None:
-      self.inner_lr = nn.Parameter(torch.tensor(inner_lr),True)
-    if inner_momentum is not None:
-      self.inner_momentum = nn.Parameter(torch.tensor(inner_momentum),True)
-
-  def forward(self, z, y=None):
-    if self.conditional_generation:
-      x = torch.cat([z,y], dim=1)
-      return self.state_head(self.relu(self.l1(x)))
-    else:
-      body = self.relu(self.l1(z))
-      return self.state_head(body), F.softmax(self.action_head(body), dim=1)
-    
 # Distillation-style wrapper to learn the teaching data directly.
 class Distiller(nn.Module):
-  def __init__(self, batch_size, state_size, action_size, inner_lr=.02, inner_momentum=.5, conditional_generation=True):
+  def __init__(self, batch_size, state_size=STATE_SPACE, action_size=ACTION_SPACE, inner_lr=.02, inner_momentum=.5, conditional_generation=True):
     super(Distiller, self).__init__()
     self.conditional_generation = conditional_generation
     
-    self.x = nn.Parameter(torch.randn((batch_size, state_size)), True)
+    x = torch.randn((batch_size, state_size))
+    
+    self.x = nn.Parameter(x, True)
     if not conditional_generation:
       self.y = nn.Parameter(torch.randn((batch_size, action_size)), True)
 
@@ -66,11 +43,10 @@ class Distiller(nn.Module):
 
 # Inner Network! Return a value for each action, determining the stochastic policy for a given state.
 class Actor(nn.Module):
-  def __init__(self, state_size, action_size, randomize_architecture=False): 
+  def __init__(self, state_size=STATE_SPACE, action_size=ACTION_SPACE, hidden_size=64):
     super(Actor, self).__init__()
-       
-    hidden_size = 64
 
+    # Note: Weight norm does not help Cartpole Distillation!!!
     self.net = nn.Sequential(layer_init(nn.Linear(state_size, hidden_size)),
                              nn.Tanh(),
                              layer_init(nn.Linear(hidden_size, hidden_size)),
@@ -81,9 +57,57 @@ class Actor(nn.Module):
   def forward(self, x):
     return self.net(x.view(x.size(0),-1))
 
+
+# Inner Network! Return a value for each action, determining the stochastic policy for a given state.
+class Actor_Ortho1(nn.Module):
+  def __init__(self, state_size=STATE_SPACE, action_size=ACTION_SPACE, hidden_size=64):
+    super(Actor_Ortho1, self).__init__()
+
+    # Note: Weight norm does not help Cartpole Distillation!!!
+    self.net = nn.Sequential(layer_init(nn.Linear(state_size, hidden_size),1),
+                             nn.Tanh(),
+                             layer_init(nn.Linear(hidden_size, hidden_size),1),
+                             nn.Tanh(),
+                             layer_init(nn.Linear(hidden_size, action_size), std=1))
+
+
+  def forward(self, x):
+    return self.net(x.view(x.size(0),-1))
+
+# Inner Network! Return a value for each action, determining the stochastic policy for a given state.
+class Actor_XE(nn.Module):
+  def __init__(self, state_size=STATE_SPACE, action_size=ACTION_SPACE):
+    super(Actor_XE, self).__init__()
+
+    hidden_size = 64
+
+    # Note: Weight norm does not help Cartpole Distillation!!!
+    self.net = nn.Sequential(layer_init_xe(nn.Linear(state_size, hidden_size)),
+                             nn.Tanh(),
+                             layer_init_xe(nn.Linear(hidden_size, hidden_size)),
+                             nn.Tanh(),
+                             layer_init_xe(nn.Linear(hidden_size, action_size), std=.01))
+
+
+  def forward(self, x):
+    return self.net(x.view(x.size(0),-1))
+
+class Actor_Variable(nn.Module):
+  def __init__(self, state_size=STATE_SPACE, action_size=ACTION_SPACE, n_hiddens=0):
+    super(Actor_Variable, self).__init__()
+    
+    hidden_size = 64
+
+    layers = [layer_init(nn.Linear(state_size, hidden_size))] + [layer_init(nn.Linear(hidden_size, hidden_size)) for _ in range(n_hiddens)] + [layer_init(nn.Linear(hidden_size, action_size), std=.01)]
+
+    self.net = nn.Sequential(*layers)
+
+  def forward(self, x):
+    return self.net(x.view(x.size(0),-1))
+
 # Return a single value for a state, estimating the future discounted reward of following the current policy (it's tied to the PolicyNet it trained with)
 class Critic(nn.Module):
-  def __init__(self, state_size):
+  def __init__(self, state_size=STATE_SPACE):
     super(Critic, self).__init__()
     
     hidden_size = 64
@@ -120,8 +144,13 @@ def layer_init(layer, std=ROOT_2, bias_const=0.0):
   torch.nn.init.constant_(layer.bias, bias_const)
   return layer
 
+def layer_init_xe(layer, std=ROOT_2, bias_const=0.0):
+  torch.nn.init.xavier_normal_(layer.weight, gain=std)
+  torch.nn.init.constant_(layer.bias, bias_const)
+  return layer
+
 # Splits the actor after encoder_size layers: the first half is the encoder, the second half is the remaining actor.
-def create_encoder_actor(state_size, action_size, encoder_size=-1):
+def create_encoder_actor(state_size=STATE_SPACE, action_size=ACTION_SPACE, encoder_size=-1):
   encoder = Actor(state_size, action_size)
   actor = encoder.net[encoder_size:]
   encoder.net = encoder.net[:encoder_size]

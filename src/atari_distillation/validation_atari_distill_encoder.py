@@ -12,13 +12,11 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
 
 from torch.distributions.categorical import Categorical
 
-from models.atari_models import Distiller, Actor, create_encoder_actor
-from envs import vector_env
+from atari_models import Distiller, Actor, create_encoder_actor
+import vector_env
 
 # Atari
 envs = ['MsPacmanNoFrameskip-v4', 'BreakoutNoFrameskip-v4', 'CentipedeNoFrameskip-v4', 'PongNoFrameskip-v4', 'SpaceInvadersNoFrameskip-v4', 'PongNoFrameskip-v4']
@@ -41,7 +39,6 @@ def main():
   parser.add_argument("-i", "--inner_epochs", help="number of inner SGD steps, using distinct batches", type=int, default=1)
   parser.add_argument("-e", "--encoder", help="if non-zero, the network will be split into an encoder and learner. Provide position of the split.", default=-1)
   parser.add_argument("-t", "--trials", help="number of trials to perform: in each, a new learner is sampled, trained on the inner task, and validated on the environment.", default=10)
-  parser.add_argument("--anneal_lr", help="reduce lr from max to 0 throughout learning", action="store_true")
   parser.add_argument("-l", "--load_from", help="load models from provided folder: will look for disiller_sd.pt and encoder_sd.pt if encoder != 0")
   parser.add_argument("--environment", help="Environment to be used, defaults to 'BreakoutNoFrameskip-v4'", default='BreakoutNoFrameskip-v4')
   parser.add_argument("result_dir", help="path to save experiment results")
@@ -77,7 +74,6 @@ def main():
   # LR and momentum will be overwritten when we load in the trained distiller.
   inner_lr = 2e-2
   inner_momentum = 0
-  inner_epochs = args.inner_epochs
   inner_batch_size = args.inner_batch
 
   ## LISTS FOR PERFORMANCE ANALYSIS ##

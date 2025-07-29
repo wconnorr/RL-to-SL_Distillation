@@ -1,25 +1,6 @@
 """
-Enhancements:
-https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
-
-1. Vectorized Environment (DONE) - lets you step through multiple environments at once. Even if all envs are cartpole, this vectorization provides cheaper action selection (1 parallelized forward pass vs <episode> forward passes).
-  - VE resets each individual env when it finishes. By detaching the environment from a typical episodic structure, we can learn on long environments whose episodes cannot fit into memory completely.
-2. Architectures (DONE) - orthogonal weight inits and biases = 0, 3 linear layers (for cartpole only) and tanh hidden layers (for whatever reason...)
-3. Adam Optimizer (DONE) - adam_eps = 1e-5, rather than PyTorch default 1e-8
-4. Learning Rate Anneal (TODO) - reduce LR from full to 0 linearly
-5. General Advantage Evaluation (DONE)
-  - bootstrap when env is not done
-6. Minibatch update
-7. Advantage Normalization (DONE) - normalize advantage rather than return
-8. Clipped Objective (DONE)
-9. Value Loss Clipping (TODO) - but may make things worse
-10. Entropy Loss (DONE)
-11. Gradient Clipping (DONE)
-
-BONUS: early stopping: set target KL divergence threshold: end training when KL divergence >= threshold
+Uses PPO to directly learn Atari (RL, no distillation)
 """
-
-# TODO: Fix atari models to better match cartpole models
 
 import os
 import argparse
@@ -36,9 +17,8 @@ from torch.utils.data import DataLoader
 from torch.distributions.categorical import Categorical
 from itertools import chain
 
-
-from models.atari_models import Actor, Critic, RLDataset
-from envs import vector_env
+from atari_models import Actor, Critic, RLDataset
+import vector_env
 
 # Atari
 
@@ -61,8 +41,6 @@ def main():
   parser.add_argument("-d", "--device", help="select device", choices=['cuda', 'cpu'])
   parser.add_argument("-p", "--policy_epochs", help="number of epochs per learning cycle", type=int, default=4)
   parser.add_argument("--save_models", help="save models in results-dir", action="store_true")
-  parser.add_argument("--simplify_states", help="FOR BREAKOUT: reduce final state size to 64 x 74 and quantize values.", action="store_true")
-  parser.add_argument("--anneal_lr", help="reduce lr from max to 0 throughout learning", action="store_true")
   parser.add_argument("--environment", help="Environment to be used, defaults to 'BreakoutNoFrameskip-v4'", default=None)
   parser.add_argument("result_dir", help="path to save results plots")
   args = parser.parse_args()
@@ -81,13 +59,12 @@ def main():
   results_path = args.result_dir
 
 
-  env = vector_env._make_atari(env_name, args.simplify_states)()
+  env = vector_env._make_atari(env_name)()
 
   global n_actions
   n_actions = env.action_space.n
   init_screen, _ = env.reset()
   c, h, w = init_screen.shape
-  state_size = h*w
   print(env_name)
   print(n_actions, "actions")
   print("Screen size (stacked and resized):",init_screen.shape)
@@ -120,10 +97,10 @@ def main():
   value_losses = []
   entropy_losses = []
 
-  env = vector_env.make_atari_vector_env(num_envs, env_name, args.simplify_states)
+  env = vector_env.make_atari_vector_env(num_envs, env_name)
     
-  policy_network = Actor(c, n_actions, simplify=args.simplify_states).to(device)
-  value_network = Critic(c,            simplify=args.simplify_states).to(device)
+  policy_network = Actor(c, n_actions).to(device)
+  value_network = Critic(c).to(device)
     
   if args.save_models:
     if not os.path.exists(os.path.join(results_path,"init")):
@@ -150,16 +127,11 @@ def main():
 
   step = 0
     
-#   num_steps = num_epochs * policy_epochs * ((rollout_len * num_envs // rl_batch_size)+1)
-#   print("Num steps estimate:", num_steps)
-
-#   loop = tqdm.tqdm(total=num_epochs, position=0, leave=False)
   last_state, _ = env.reset()
   last_state = torch.from_numpy(last_state)
 
   epoch = 0
     
-#   for epoch in range(num_epochs):
   while(True):
     
     gather_data = True
@@ -189,11 +161,6 @@ def main():
           memory_iter = iter(memory_dataloader)
           transition = next(memory_iter)
           reset_iter = False
-    
-        # Anneal lr
-        if args.anneal_lr:
-          frac = 1.0 - (step - 1) / num_steps
-          optimizer.param_groups[0]['lr'] = frac * lr
     
         # Calculate and accumulate losses
         policy_loss, value_loss, entropy_loss = calculate_losses(policy_network, value_network, transition, epsilon)

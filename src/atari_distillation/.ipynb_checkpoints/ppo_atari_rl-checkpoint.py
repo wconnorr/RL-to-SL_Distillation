@@ -1,3 +1,7 @@
+"""
+Uses PPO to directly learn Atari (RL, no distillation)
+"""
+
 import os
 import argparse
 
@@ -13,12 +17,14 @@ from torch.utils.data import DataLoader
 from torch.distributions.categorical import Categorical
 from itertools import chain
 
-from models.cartpole_models import Actor, Critic, RLDataset
-from envs import vector_env
+from atari_models import Actor, Critic, RLDataset
+import vector_env
 
-n_actions = None
-state_size = None
-num_envs = 10 # number of parallel environments to gather data from
+# Atari
+
+envs = ['MsPacmanNoFrameskip-v4', 'BreakoutNoFrameskip-v4', 'CentipedeNoFrameskip-v4', 'PongNoFrameskip-v4', 'SpaceInvadersNoFrameskip-v4', 'PongNoFrameskip-v4']
+env_name = envs[4]
+
 device = None
 
 # Return GPU if available, else return CPU
@@ -29,19 +35,20 @@ def select_device(assert_gpu=False):
   return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def main():
-  global n_actions, state_size, device
     
   # Parser arguments
   parser = argparse.ArgumentParser()
   parser.add_argument("-d", "--device", help="select device", choices=['cuda', 'cpu'])
   parser.add_argument("-p", "--policy_epochs", help="number of epochs per learning cycle", type=int, default=4)
-  parser.add_argument("-e", "--epochs", help="number of epochs", type=int, default=10000)
   parser.add_argument("--save_models", help="save models in results-dir", action="store_true")
-  parser.add_argument("--anneal_lr", help="reduce lr from max to 0 throughout learning", action="store_true")
+  parser.add_argument("--environment", help="Environment to be used, defaults to 'BreakoutNoFrameskip-v4'", default=None)
   parser.add_argument("result_dir", help="path to save results plots")
-  parser.add_argument("--degrees_of_freedom", help="degrees of freedom for nd cartpole environment: standard 2D cartpole has 1 dof", type=int, default=1)
   args = parser.parse_args()
   print("EXPERIMENT: ", args)
+    
+  global device, env_name
+  if args.environment:
+    env_name = args.environment
     
   if args.device:
     device = torch.device(args.device)
@@ -51,18 +58,30 @@ def main():
     
   results_path = args.result_dir
 
+
+  env = vector_env._make_atari(env_name)()
+
+  global n_actions
+  n_actions = env.action_space.n
+  init_screen, _ = env.reset()
+  c, h, w = init_screen.shape
+  print(env_name)
+  print(n_actions, "actions")
+  print("Screen size (stacked and resized):",init_screen.shape)
+
+
   ## RL MODES ##
   ## HYPERPARAMETERS ##
   # OUTER HYPERPARAMETERS
   lr = 2.5e-4
-  num_epochs = args.epochs
-  episodes = 10 # Number of episodes to perform for each outer iteration
+#   num_epochs = 10000
+  num_envs = 10 # number of parallel environments to gather data from
   rollout_len = 200 # number of steps to take in the envs per rollout
   policy_epochs = args.policy_epochs
   rl_batch_size = 512 # Batch size can work with a wide range of values
   gamma = .99
   gae_lambda = .95
-  epsilon = .2
+  epsilon = .1
     
   max_grad_norm = .5
 
@@ -71,10 +90,6 @@ def main():
     
   adam_eps = 1e-5 # default parameter is 1e-8
 
-
-  reward_threshold = 500
-
-
   ## LISTS FOR PERFORMANCE ANALYSIS ##
   # OUTER STATISTICS
   end_rewards = []
@@ -82,30 +97,23 @@ def main():
   value_losses = []
   entropy_losses = []
 
-  if args.degrees_of_freedom > 1:
-    env = vector_env.make_ndcartpole_vector_env(num_envs, args.degrees_of_freedom, reward_threshold)
-  else:
-    env = vector_env.make_cartpole_vector_env(num_envs)
-
-  n_actions = 2 * args.degrees_of_freedom
-  state_size = 4 * args.degrees_of_freedom
+  env = vector_env.make_atari_vector_env(num_envs, env_name)
     
-
-  policy_network = Actor(state_size, n_actions).to(device)
-  value_network = Critic(state_size).to(device)
-   
+  policy_network = Actor(c, n_actions).to(device)
+  value_network = Critic(c).to(device)
+    
   if args.save_models:
     if not os.path.exists(os.path.join(results_path,"init")):
         os.makedirs(os.path.join(results_path,"init"))
     torch.save(policy_network.state_dict(), os.path.join(results_path, "init", 'policy_sd.pt'))
     torch.save(value_network.state_dict(), os.path.join(results_path, "init", 'value_sd.pt'))
- 
-  policy_optimizer = optim.Adam(policy_network.parameters(), lr=lr, eps=adam_eps)
-  value_optimizer = optim.Adam(value_network.parameters(), lr=lr, eps=adam_eps)
+
+  optimizer = optim.Adam(chain(policy_network.parameters(), value_network.parameters()), lr=lr, eps=adam_eps)
+
 
   # Rollout data structures: constant length based on number of steps and envs.
   # No need to define these each rollout session, just overwrite them!
-  states = torch.zeros((rollout_len, num_envs, state_size)).to(device)
+  states = torch.zeros((rollout_len, num_envs, c, h, w)).to(device)
   actions = torch.zeros((rollout_len, num_envs)).to(device)
   prior_policy = torch.zeros((rollout_len, num_envs)).to(device) # stored for chosen action only!
   rewards = torch.zeros((rollout_len, num_envs)).to(device)
@@ -119,12 +127,12 @@ def main():
 
   step = 0
     
-  num_steps = num_epochs * policy_epochs * ((rollout_len * num_envs // rl_batch_size)+1)
-  print("Num steps estimate:", num_steps)
+  last_state, _ = env.reset()
+  last_state = torch.from_numpy(last_state)
 
-  last_state = torch.from_numpy(env.reset()[0])
+  epoch = 0
     
-  for epoch in range(num_epochs):
+  while(True):
     
     gather_data = True
     
@@ -154,20 +162,13 @@ def main():
           transition = next(memory_iter)
           reset_iter = False
     
-        # Anneal lr
-        if args.anneal_lr:
-          frac = 1.0 - (step - 1) / num_steps
-          policy_optimizer.param_groups[0]['lr'] = frac * lr
-    
         # Calculate and accumulate losses
         policy_loss, value_loss, entropy_loss = calculate_losses(policy_network, value_network, transition, epsilon)
         loss = policy_loss + value_coefficient * value_loss - entropy_coefficient * entropy_loss
         loss.backward()
         nn.utils.clip_grad_norm_(chain(policy_network.parameters(), value_network.parameters()), max_grad_norm)
-        policy_optimizer.step()
-        policy_optimizer.zero_grad()
-        value_optimizer.step()
-        value_optimizer.zero_grad()
+        optimizer.step()
+        optimizer.zero_grad()
         
         policy_losses.append(policy_loss.item())
         value_losses.append(value_loss.item())
@@ -181,14 +182,20 @@ def main():
         except:
           epoch_done = True
     
-    if epoch % 100 == 99:
+#     if epoch % 100 == 99:
+#       loop.set_description("Epoch: {} Last Reward: {}".format(epoch, int(end_rewards[-1])))
+#       loop.update(100)
+    if epoch % 1000 == 999:
       plot(os.path.join(results_path, str(epoch+1)), end_rewards, policy_losses, value_losses, entropy_losses)
       if args.save_models:
         torch.save(policy_network.state_dict(), os.path.join(results_path, str(epoch+1), 'policy_sd.pt'))
         torch.save(value_network.state_dict(), os.path.join(results_path, str(epoch+1), 'value_sd.pt'))
+    epoch += 1
+#   loop.close()
 
-  print("CLOSED AFTER", step, "STEPS")
-
+#   print("CLOSED AFTER", step, "STEPS")
+    
+    
 def plot(path, rewards, policy_losses, value_losses, entropy_losses):
     if not os.path.exists(path):
       os.makedirs(path)
@@ -248,7 +255,7 @@ def calculate_losses(policy_network, value_network, transition, epsilon):
   states, actions, prior_policy, _, _, _, returns, advantages, entropies = transition
 
   current_policy = policy_network(states)[F.one_hot(actions.long(), n_actions).bool()]
-  current_values = value_network(states)
+  current_values = value_network(states).squeeze(1)
 
   # calculate ratio quicker this way, rather than softmaxing them both
   ratio = (current_policy - prior_policy).exp()
@@ -256,9 +263,10 @@ def calculate_losses(policy_network, value_network, transition, epsilon):
   # normalize advantages
   advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-  policy_loss = -torch.min(advantages*ratio, advantages*torch.clamp(ratio, 1-epsilon, 1+epsilon)).mean()
+  policy_loss = -torch.min(advantages*ratio, advantages*torch.clamp(ratio, 1-epsilon, 1+epsilon))
+  policy_loss = policy_loss.mean()
   # TODO: Try clipping value loss and see if it works
-  value_loss = F.mse_loss(current_values.squeeze(1), returns)
+  value_loss = F.mse_loss(current_values, returns)
     
   # TODO: Add entropy loss back in
 
@@ -280,7 +288,7 @@ def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state):
       next_state, reward, done, _, info = vec_env.step(action.cpu().numpy())
 
       # Store step for learning
-      states[i] = state.view(num_envs, state_size) # flatten each state observation
+      states[i] = state
       actions[i] = action
       prior_policy[i] = action_distribution
       rewards[i] = torch.from_numpy(reward)
@@ -289,15 +297,11 @@ def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state):
       entropies[i] = entropy
     
       state = torch.from_numpy(next_state)
-  
+    
       if isinstance(info, dict) and 'final_info' in info.keys():
         epis = [a for a in info['final_info'] if a is not None]
         for item in epis:
           final_rewards.append(item['episode']['r'])
-      else:
-        for item in info:
-          if "episode" in item.keys():
-            final_rewards.append(item['episode']['r'])
     
   return final_rewards, state, done # no need to return rollout, its updated in-place
 
@@ -319,6 +323,7 @@ def general_advantage_estimation(critic, rollout, next_state, next_done, gamma, 
     nextnonterminal = 1. - torch.from_numpy(next_done).float().to(device)
     nextvalues = next_value
     delta = rewards[rollout_len-1] + gamma * nextvalues*nextnonterminal - values[rollout_len-1]
+    
     advantages[rollout_len-1] = last_lambda = delta # + gamma * gae_lambda * nextnonterminal * last_lambda # last_lambda = 0, so this is 0
     for t in reversed(range(rollout_len-1)):
       nextnonterminal = 1.0 - dones[t+1]

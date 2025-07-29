@@ -2,40 +2,8 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from torch.utils.data import Dataset
-
-# Generator Architectures
-
-# GTN-style generator to produce the teaching data
-class GTNGenerator(nn.Module):
-  def __init__(self, state_space, action_space, z_vector_size, inner_lr=.02, inner_momentum=.5, conditional_generation=True):
-    super(GTNGenerator, self).__init__()
-
-    self.input_size = z_vector_size + (action_space if conditional_generation else 0)
-    self.conditional_generation = conditional_generation
-    hidden_size = z_vector_size * 2
-    
-    self.l1 = nn.Linear(self.input_size, hidden_size)
-    self.relu = nn.ReLU()
-    self.state_head = nn.Linear(hidden_size, state_space)
-    if not conditional_generation:
-      self.action_head = nn.Linear(hidden_size, action_space)
-
-    # Inner optimizer parameters
-    if inner_lr is not None:
-      self.inner_lr = nn.Parameter(torch.tensor(inner_lr),True)
-    if inner_momentum is not None:
-      self.inner_momentum = nn.Parameter(torch.tensor(inner_momentum),True)
-
-  def forward(self, z, y=None):
-    if self.conditional_generation:
-      x = torch.cat([z,y], dim=1)
-      return self.state_head(self.relu(self.l1(x)))
-    else:
-      body = self.relu(self.l1(z))
-      return self.state_head(body), F.softmax(self.action_head(body), dim=1)
     
 # Distillation-style wrapper to learn the teaching data directly.
 class Distiller(nn.Module):
@@ -86,10 +54,9 @@ class Actor(nn.Module): # an actor-critic neural network
           layer_init(nn.Conv2d(64, 64, 3, stride=1)),
           nn.ReLU()
         )
-        # h, w = (7,7) # w/ Atari preprocesing wrapper, the size will be 7x7 here
+        h, w = 7,7
         self.head = nn.Sequential(
-          # layer_init(nn.Linear(64*h*w, 512)),
-          layer_init(nn.Linear(3136, 512)), #3136 = 64*7*7
+          layer_init(nn.Linear(64*h*w, 512)),
           nn.ReLU(),
           layer_init(nn.Linear(512, num_actions), std=.01)
         )
@@ -100,7 +67,7 @@ class Actor(nn.Module): # an actor-critic neural network
         return self.head(x)
         
 class Critic(nn.Module): # an actor-critic neural network
-    def __init__(self, state_channels, simplify=False):
+    def __init__(self, state_channels):
         super(Critic, self).__init__()
 
         self.convs = nn.Sequential(
@@ -111,7 +78,7 @@ class Critic(nn.Module): # an actor-critic neural network
           layer_init(nn.Conv2d(64, 64, 3, stride=1)),
           nn.ReLU()
         )
-        h, w = (4,6) if simplify else (7,7) 
+        h, w = 7,7
         self.head = nn.Sequential(
           layer_init(nn.Linear(64*h*w, 512)),
           nn.ReLU(),
@@ -150,12 +117,13 @@ def layer_init(layer, std=ROOT_2, bias_const=0.0):
   return layer
 
 # Splits the actor after encoder_size layers: the first half is the encoder, the second half is the remaining actor.
-def create_encoder_actor(state_channels, action_size, encoder_size=-1, base_model=None):
+# NOTE: we are splitting by head, NOT convolutions. This is just easier to implement for now...
+def create_encoder_actor(state_channels, action_size, encoder_size=-1, use_full_head=False, base_model=None):
   if base_model is None:
     encoder = Actor(state_channels, action_size)
   else:
     encoder = base_model
-  if encoder_size==-2:
+  if use_full_head or encoder_size==-2:
     actor = encoder.head
     encoder.head = nn.Identity()
   elif encoder_size == -1:

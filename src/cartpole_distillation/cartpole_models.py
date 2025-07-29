@@ -1,16 +1,18 @@
+"""
+Models used in cart-pole distillation experiments.
+"""
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 
 
 # ACTION SPACE: steer cart [left, right]
 ACTION_SPACE = 2
-# STATE SPACE:  [x_cart, vx_cart, theta_pole_, vtheta_pole] (not necessarily in that order)
+# STATE SPACE:  [x_cart, vx_cart, theta_pole_, vtheta_pole]
 STATE_SPACE  = 4
-
-# Generator Architectures
+    
 # Distillation-style wrapper to learn the teaching data directly.
 class Distiller(nn.Module):
   def __init__(self, batch_size, state_size=STATE_SPACE, action_size=ACTION_SPACE, inner_lr=.02, inner_momentum=.5, conditional_generation=True):
@@ -18,7 +20,6 @@ class Distiller(nn.Module):
     self.conditional_generation = conditional_generation
     
     x = torch.randn((batch_size, state_size))
-    
     self.x = nn.Parameter(x, True)
     if not conditional_generation:
       self.y = nn.Parameter(torch.randn((batch_size, action_size)), True)
@@ -40,8 +41,10 @@ class Distiller(nn.Module):
 
 # Inner Network! Return a value for each action, determining the stochastic policy for a given state.
 class Actor(nn.Module):
-  def __init__(self, state_size=STATE_SPACE, action_size=ACTION_SPACE, hidden_size=64):
+  def __init__(self, state_size=STATE_SPACE, action_size=ACTION_SPACE): 
     super(Actor, self).__init__()
+       
+    hidden_size = 64
 
     # Note: Weight norm does not help Cartpole Distillation!!!
     self.net = nn.Sequential(layer_init(nn.Linear(state_size, hidden_size)),
@@ -51,54 +54,6 @@ class Actor(nn.Module):
                              layer_init(nn.Linear(hidden_size, action_size), std=.01))
     
     
-  def forward(self, x):
-    return self.net(x.view(x.size(0),-1))
-
-
-# Inner Network! Return a value for each action, determining the stochastic policy for a given state.
-class Actor_Ortho1(nn.Module):
-  def __init__(self, state_size=STATE_SPACE, action_size=ACTION_SPACE, hidden_size=64):
-    super(Actor_Ortho1, self).__init__()
-
-    # Note: Weight norm does not help Cartpole Distillation!!!
-    self.net = nn.Sequential(layer_init(nn.Linear(state_size, hidden_size),1),
-                             nn.Tanh(),
-                             layer_init(nn.Linear(hidden_size, hidden_size),1),
-                             nn.Tanh(),
-                             layer_init(nn.Linear(hidden_size, action_size), std=1))
-
-
-  def forward(self, x):
-    return self.net(x.view(x.size(0),-1))
-
-# Inner Network! Return a value for each action, determining the stochastic policy for a given state.
-class Actor_XE(nn.Module):
-  def __init__(self, state_size=STATE_SPACE, action_size=ACTION_SPACE):
-    super(Actor_XE, self).__init__()
-
-    hidden_size = 64
-
-    # Note: Weight norm does not help Cartpole Distillation!!!
-    self.net = nn.Sequential(layer_init_xe(nn.Linear(state_size, hidden_size)),
-                             nn.Tanh(),
-                             layer_init_xe(nn.Linear(hidden_size, hidden_size)),
-                             nn.Tanh(),
-                             layer_init_xe(nn.Linear(hidden_size, action_size), std=.01))
-
-
-  def forward(self, x):
-    return self.net(x.view(x.size(0),-1))
-
-class Actor_Variable(nn.Module):
-  def __init__(self, state_size=STATE_SPACE, action_size=ACTION_SPACE, n_hiddens=0):
-    super(Actor_Variable, self).__init__()
-    
-    hidden_size = 64
-
-    layers = [layer_init(nn.Linear(state_size, hidden_size))] + [layer_init(nn.Linear(hidden_size, hidden_size)) for _ in range(n_hiddens)] + [layer_init(nn.Linear(hidden_size, action_size), std=.01)]
-
-    self.net = nn.Sequential(*layers)
-
   def forward(self, x):
     return self.net(x.view(x.size(0),-1))
 
@@ -138,11 +93,6 @@ ROOT_2 = 2.0**.5
 # INITIALIZATION FUNCTIONS #
 def layer_init(layer, std=ROOT_2, bias_const=0.0):
   torch.nn.init.orthogonal_(layer.weight, std)
-  torch.nn.init.constant_(layer.bias, bias_const)
-  return layer
-
-def layer_init_xe(layer, std=ROOT_2, bias_const=0.0):
-  torch.nn.init.xavier_normal_(layer.weight, gain=std)
   torch.nn.init.constant_(layer.bias, bias_const)
   return layer
 

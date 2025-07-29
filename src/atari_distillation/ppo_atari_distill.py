@@ -1,22 +1,5 @@
 """
-Enhancements:
-https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
-
-1. Vectorized Environment (DONE) - lets you step through multiple environments at once. Even if all envs are cartpole, this vectorization provides cheaper action selection (1 parallelized forward pass vs <episode> forward passes).
-  - VE resets each individual env when it finishes. By detaching the environment from a typical episodic structure, we can learn on long environments whose episodes cannot fit into memory completely.
-2. Architectures (DONE) - orthogonal weight inits and biases = 0, 3 linear layers (for cartpole only) and tanh hidden layers (for whatever reason...)
-3. Adam Optimizer (DONE) - adam_eps = 1e-5, rather than PyTorch default 1e-8
-4. Learning Rate Anneal (TODO) - reduce LR from full to 0 linearly
-5. General Advantage Evaluation (DONE)
-  - bootstrap when env is not done
-6. Minibatch update
-7. Advantage Normalization (DONE) - normalize advantage rather than return
-8. Clipped Objective (DONE)
-9. Value Loss Clipping (TODO) - but may make things worse
-10. Entropy Loss (DONE)
-11. Gradient Clipping (DONE)
-
-BONUS: early stopping: set target KL divergence threshold: end training when KL divergence >= threshold
+Uses PPO to distill Atari environments.
 """
 
 import os
@@ -36,11 +19,10 @@ from torch.utils.data import DataLoader
 from torch.distributions.categorical import Categorical
 from itertools import chain
 
-
 import higher
 
-from models.atari_models import Distiller, GTNGenerator, Critic, RLDataset, create_encoder_actor
-from envs import vector_env
+from atari_models import Distiller, Actor, Critic, RLDataset, Encoder
+import vector_env
 
 # Atari
 envs = ['MsPacmanNoFrameskip-v4', 'BreakoutNoFrameskip-v4', 'CentipedeNoFrameskip-v4', 'PongNoFrameskip-v4', 'SpaceInvadersNoFrameskip-v4', 'PongNoFrameskip-v4']
@@ -61,18 +43,14 @@ def main():
   parser.add_argument("-b", "--inner_batch", help="inner/generated batch size", type=int, default=512)
   parser.add_argument("-c", "--conditional", help="use conditional generation (labels not learned/generated)", action="store_true")
   parser.add_argument("-d", "--device", help="select device", choices=['cuda', 'cpu'])
-  parser.add_argument("-g", "--generator", help="use GTN generator rather than distiller", action="store_true")
   parser.add_argument("-i", "--inner_epochs", help="number of inner SGD steps, using distinct batches", type=int, default=1)
   parser.add_argument("-l", "--load", help="load model at provided epoch and continue learning from there", type=int)
   parser.add_argument("-p", "--policy_epochs", help="number of epochs per learning cycle", type=int, default=4)
   parser.add_argument("-s", "--static_initialization", help="reinitialize parameters to a static initialization every outer iteration", action="store_true")
   parser.add_argument("-t", "--state_initialization", help="load real states for initializing the distiller from this file")
-  parser.add_argument("-z", "--zlearning", help="learn z vector for GTN", action="store_true")
-  parser.add_argument("-e", "--encoder", help="if non-zero, the network will be split into an encoder and learner. Provide position of the split.", default=-1)
-  parser.add_argument("--anneal_lr", help="reduce lr from max to 0 throughout learning", action="store_true")
+  parser.add_argument("--encoder", help="if non-zero, an encoding layer will be placed in front of the network and trained /w the distiller. Provide encoding size.", type=int, default=0)
   parser.add_argument("--load_from", help="load models from provided folder: will look for disiller_sd.pt and critic_sd.pt")
   parser.add_argument("--max_epochs", help="end after performing x epochs: negative values signify infinite loop", type=int, default=-1)
-  parser.add_argument("--simplify_states", help="FOR BREAKOUT: reduce final state size to 64 x 74 and quantize values.", action="store_true")
   parser.add_argument("--environment", help="Environment to be used, defaults to 'BreakoutNoFrameskip-v4'", default='BreakoutNoFrameskip-v4')
   parser.add_argument("result_dir", help="path to save results plots")
   args = parser.parse_args()
@@ -91,7 +69,7 @@ def main():
   results_path = args.result_dir
 
   # This env is created to get us the correct state and action space dimensions. A vectorized version is used in training.
-  env = vector_env._make_atari(env_name, args.simplify_states)()
+  env = vector_env._make_atari(env_name)()
 
   global n_actions
   n_actions = env.action_space.n
@@ -107,15 +85,12 @@ def main():
   use_consistent_setup = args.static_initialization
 
   ## GENERATOR MODES ##
-  use_gtn = args.generator
-  learn_z_vector = args.zlearning
   use_conditional_generation = args.conditional
 
   ## HYPERPARAMETERS ##
   # OUTER HYPERPARAMETERS
   rl_lr = 2.5e-4
   num_meta_epochs = 10000
-  episodes = 10 # Number of episodes to perform for each outer iteration
   num_envs = 10 # number of parallel environments to gather data from
   rollout_len = 200 # number of steps to take in the envs per rollout
   policy_epochs = args.policy_epochs
@@ -153,51 +128,38 @@ def main():
     
   inner_objective = nn.CrossEntropyLoss() if use_conditional_generation else nn.MSELoss()
 
-  env = vector_env.make_atari_vector_env(num_envs, env_name, args.simplify_states)
+  env = vector_env.make_atari_vector_env(num_envs, env_name)
 
   # Set up distiller
-  if use_gtn:
-    distiller = GTNGenerator(z_vector_size, inner_lr, None, conditional_generation=use_conditional_generation).to(device)
-    if learn_z_vector:
-      distiller.z = nn.Parameter(torch.randn((inner_batch_size, z_vector_size), device=device), True)
-  else:
-    distiller = Distiller(c, h, w, n_actions, inner_batch_size, inner_lr, None, conditional_generation=use_conditional_generation).to(device)
-    if args.state_initialization:
-      states = torch.load(args.state_initialization)
-      num_states = states.size(0)
-      selected_states = states[torch.multinomial(torch.ones(num_states), inner_batch_size, replacement=(num_states<inner_batch_size)), :]
-      if args.simplify_states:
-            # perform state simplification: cut and quantize
-            selected_states = selected_states[:,:,12:-6, 4:-4]
-#             wher = selected_states < .2
-#             selected_states[wher] = 0.
-#             selected_states[np.logical_not(wher)] = 1.
-      with torch.no_grad():
-        distiller.x.data = selected_states
-        distiller.to(device)
+  distiller = Distiller(c, h, w, n_actions, inner_batch_size, inner_lr, None, conditional_generation=use_conditional_generation).to(device)
+  if args.state_initialization:
+    states = torch.load(args.state_initialization)
+    num_states = states.size(0)
+    selected_states = states[torch.multinomial(torch.ones(num_states), inner_batch_size, replacement=(num_states<inner_batch_size)), :]
+    with torch.no_grad():
+      distiller.x.data = selected_states
+      distiller.to(device)
     
   # Set static targets when using conditional generation
   if use_conditional_generation:
     actions_target = torch.randn(0, n_actions, (inner_batch_size,), device=device)
     actions_target_one_hot = F.one_hot(actions_target, num_classes=n_actions)
 
-  outer_optimizer = optim.Adam(distiller.parameters(), lr=rl_lr, eps=adam_eps)
-
-  critic = Critic(c, simplify=args.simplify_states).to(device)
+  if args.encoder > 0:
+    encoder = Encoder(c, h, w, args.encoder).to(device)
+    outer_optimizer = optim.Adam(chain(distiller.parameters(), encoder.parameters()), lr=rl_lr, eps=adam_eps)
+  else:
+    encoder = None
+    outer_optimizer = optim.Adam(distiller.parameters(), lr=rl_lr, eps=adam_eps) 
+    
+  critic = Critic(c).to(device)
     
   critic_optimizer = optim.Adam(critic.parameters(), lr=critic_lr, eps=adam_eps)
 
-  if args.encoder == 'full_head':
-    encoder, actor = create_encoder_actor(c, n_actions, use_full_head=True)
-  else:
-    encoder, actor = create_encoder_actor(c, n_actions, int(args.encoder))
-  encoder = encoder.to(device)
-  actor = actor.to(device)
-  encoder_optimizer = optim.Adam(encoder.parameters(), lr=rl_lr, eps=adam_eps)
-
-
   if use_consistent_setup:
-    stable_init_sd = actor.state_dict()
+    stable_init = Actor(c, n_actions)
+    actor = Actor(c, n_actions).to(device)
+
 
   # Rollout data structures: constant length based on number of steps and envs.
   # No need to define these each rollout session, just overwrite them!
@@ -222,31 +184,23 @@ def main():
   last_state = torch.from_numpy(initial_state)
     
   meta_epoch = 0
-
-  if args.load:
-    meta_epoch = args.load
-    load(distiller, os.path.join(results_path, str(meta_epoch), "distiller_sd.pt"))
-    outer_optimizer = optim.Adam(distiller.parameters(), lr=rl_lr, eps=adam_eps) 
     
   if args.load_from:
     load(distiller, os.path.join(args.load_from, "distiller_sd.pt"))
-    outer_optimizer = optim.Adam(distiller.parameters(), lr=rl_lr,     eps=adam_eps) 
+    outer_optimizer = optim.Adam(distiller.parameters(), lr=rl_lr,     eps=adam_eps)
+    load(outer_optimizer, os.path.join(args.load_from, "outer_optimizer_sd.pt")) 
     load(critic,    os.path.join(args.load_from, "critic_sd.pt"      ))
     critic_optimizer = optim.Adam(critic.parameters(),   lr=critic_lr, eps=adam_eps)
-    load(encoder, os.path.join(args.load_from, "encoder_sd.pt"))
-    encoder_optimizer = optim.Adam(encoder.parameters(), lr=rl_lr, eps=adam_eps) 
+    
     
     
   while(meta_epoch != args.max_epochs):
     
     # Reinitialize inner network
     if use_consistent_setup:
-      actor.load_state_dict(stable_init_sd)
+      actor.load_state_dict(stable_init.state_dict())
     else:
-      if args.encoder == 'full_head':
-        actor = create_encoder_actor(c, n_actions, use_full_head=True)[1].to(device)
-      else:
-        actor = create_encoder_actor(c, n_actions, int(args.encoder))[1].to(device)      
+      actor = Actor(c, n_actions).to(device)
     
     init_sd = copy.deepcopy(actor.state_dict()) # this initialization will be used throughout this meta-epoch
     
@@ -277,32 +231,11 @@ def main():
         
           ### SUPERVISED INNER LEARNING ###
           for inner_epoch in range(inner_epochs):
-            if use_gtn:
-              # get latent vector z to generate labels
-              if learn_z_vector:
-                z = distiller.z
-                # if conditional_generation, y is also learned, so it won't be sampled here
-              else:
-                z = torch.randn((inner_batch_size, z_vector_size), device=device)
-                
-                if conditional_generation:
-                  actions_target = torch.randint(0, n_actions, (inner_batch_size,), device=device) # Generate one integer label between [0,n_actions) per generated instance.
-                  actions_target_one_hot = F.one_hot(actions_target, num_classes=n_actions)
-        
-            # Generate a batch of data instances (and labels if necessary)
-              if use_conditional_generation:
-                state = distiller(z, actions_target_one_hot)
-              else:
-                state, actions_target = distiller(z)
+            if use_conditional_generation:
+              state = distiller()
             else:
-              if use_conditional_generation:
-                state = distiller()
-              else:
-                state, actions_target = distiller()
-            
-            if encoder is not None:
-              state = encoder(state)
-
+              state, actions_target = distiller()
+                
             # Use actor to predict the policy/action for a given state
             actions_prediction = h_actor(state)
             # Classification loss: hard (CEL) w/ conditional generation, soft (MSE) w/ non-conditional
@@ -317,9 +250,7 @@ def main():
           ### PPO OUTER TRAINING ###
           # Gather data with first net only!
           if gather_data:
-            memory = []
-            epoch_rewards = []
-            rollout_rewards, last_state, last_done = perform_rollout(h_actor, critic, env, rollout, rollout_len, last_state, encoder=encoder)
+            rollout_rewards, last_state, last_done = perform_rollout(h_actor, critic, env, rollout, rollout_len, last_state)
             
             general_advantage_estimation(critic, rollout, last_state, last_done, gamma, gae_lambda)
         
@@ -332,21 +263,13 @@ def main():
             transition = next(memory_iter)
             reset_iter = False
     
-          # Anneal lr
-          if args.anneal_lr:
-            frac = 1.0 - (step - 1) / num_steps
-            outer_optimizer.param_groups[0]['lr'] = frac * rl_lr
-    
           # Calculate and accumulate losses
-          policy_loss, value_loss, entropy_loss = calculate_losses(h_actor, critic, transition, epsilon, encoder=encoder)
+          policy_loss, value_loss, entropy_loss = calculate_losses(h_actor, critic, transition, epsilon)
           loss = policy_loss + value_coefficient * value_loss - entropy_coefficient * entropy_loss
           loss.backward()
           nn.utils.clip_grad_norm_(chain(distiller.parameters(), critic.parameters()), max_grad_norm)
           outer_optimizer.step()
           outer_optimizer.zero_grad()
-          encoder_optimizer.step()
-          encoder_optimizer.zero_grad()
-
           critic_optimizer.step()
           critic_optimizer.zero_grad()
         
@@ -362,22 +285,26 @@ def main():
             epoch_done = True
     
     if meta_epoch % 5000 == 0:
-      save(os.path.join(results_path, str(meta_epoch)), distiller.state_dict(), critic.state_dict(), encoder.state_dict(), end_rewards, policy_losses, value_losses, entropy_losses, inner_losses, inner_lrs)
+      save(os.path.join(results_path, str(meta_epoch)), None, None, None, end_rewards, policy_losses, value_losses, entropy_losses, inner_losses, inner_lrs)
+      if meta_epoch > 50000:
+        torch.save(distiller.state_dict(), os.path.join(results_path, str(meta_epoch), "distiller_sd.pt"))
+        torch.save(critic.state_dict(), os.path.join(results_path, str(meta_epoch), "critic_sd.pt"))
+        torch.save(outer_optimizer.state_dict(), os.path.join(results_path, str(meta_epoch), "outer_optimizer_sd.pt"))
     meta_epoch += 1
     
-  save(os.path.join(results_path, "final"), distiller.state_dict(), critic.state_dict(), encoder.state_dict(), end_rewards, policy_losses, value_losses, entropy_losses, inner_losses, inner_lrs)
+  save(os.path.join(results_path, "final"), distiller.state_dict(), critic.state_dict(), outer_optimizer.state_dict(), end_rewards, policy_losses, value_losses, entropy_losses, inner_losses, inner_lrs)
     
-def save(path, distiller_sd, critic_sd, encoder_sd, rewards, policy_losses, value_losses, entropy_losses, inner_losses, inner_lrs):
+def save(path, distiller_sd, critic_sd, outer_optimizer_sd, rewards, policy_losses, value_losses, entropy_losses, inner_losses, inner_lrs):
     if not os.path.exists(path):
       os.makedirs(path)
     
     print("SAVING TO " + str(path))
     
-    torch.save(distiller_sd, os.path.join(path, "distiller_sd.pt"))
-    torch.save(critic_sd, os.path.join(path, "critic_sd.pt"))
-    if encoder_sd is not None:
-      torch.save(encoder_sd, os.path.join(path, "encoder_sd.pt"))   
- 
+    if distiller_sd is not None:
+      torch.save(distiller_sd, os.path.join(path, "distiller_sd.pt"))
+      torch.save(critic_sd, os.path.join(path, "critic_sd.pt"))
+      torch.save(outer_optimizer_sd, os.path.join(path, "outer_optimizer_sd.pt"))
+    
     fig = plt.figure()
     plt.plot(rewards)
     plt.plot([e for e in pd.Series.rolling(pd.Series(rewards), 10).mean()])
@@ -419,7 +346,7 @@ def save(path, distiller_sd, critic_sd, encoder_sd, rewards, policy_losses, valu
     plt.plot([e for e in pd.Series.rolling(pd.Series(inner_losses), 10).mean()])
     plt.plot([e for e in pd.Series.rolling(pd.Series(inner_losses), 100).mean()])
     plt.xlabel("Outer Optimization Step")
-    plt.ylabel("Supervised Loss")
+    plt.ylabel("Mean Supervised Loss")
     plt.title("Inner Losses")
     fig.savefig(os.path.join(path, "inner_loss.png"), dpi=fig.dpi)
 
@@ -443,24 +370,18 @@ def load(distiller, file_path):
     
 # Policy Gradient Methods
 
-def act(actor, critic, state, encoder=None):
+def act(actor, critic, state):
   with torch.no_grad():
     value = critic(state)
-    if encoder is None:
-      policy = actor(state)
-    else:
-      policy = actor(encoder(state))
+    policy = actor(state)
     probs = Categorical(logits=policy)
     action = probs.sample()
   return action, probs.log_prob(action), probs.entropy(), value
 
-def calculate_losses(policy_network, value_network, transition, epsilon, encoder=None):
+def calculate_losses(policy_network, value_network, transition, epsilon):
   states, actions, prior_policy, _, _, _, returns, advantages, entropies = transition
 
-  if encoder is None:
-    current_policy = policy_network(states)[F.one_hot(actions.long(), n_actions).bool()]
-  else:
-    current_policy = policy_network(encoder(states))[F.one_hot(actions.long(), n_actions).bool()]
+  current_policy = policy_network(states)[F.one_hot(actions.long(), n_actions).bool()]
   current_values = value_network(states).squeeze(1)
 
   # calculate ratio quicker this way, rather than softmaxing them both
@@ -476,7 +397,7 @@ def calculate_losses(policy_network, value_network, transition, epsilon, encoder
   return policy_loss, value_loss, entropies.mean()
 
 # Performs 1 rollout of fixed length of the agent acting in the environment.
-def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state, encoder=None):
+def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state):
   with torch.no_grad():
     final_rewards = []
     states, actions, prior_policy, rewards, dones, values, _, _, entropies = rollout
@@ -484,7 +405,7 @@ def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state, encoder
     # Episode loop
     for i in range(rollout_len):
       # Agent chooses action
-      action, action_distribution, entropy, value = act(agent, critic, state.to(device), encoder=encoder)
+      action, action_distribution, entropy, value = act(agent, critic, state.to(device))
 
       # Env takes step based on action
       next_state, reward, done, _, info = vec_env.step(action.cpu().numpy())

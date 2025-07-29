@@ -1,22 +1,5 @@
 """
-Enhancements:
-https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
-
-1. Vectorized Environment (DONE) - lets you step through multiple environments at once. Even if all envs are cartpole, this vectorization provides cheaper action selection (1 parallelized forward pass vs <episode> forward passes).
-  - VE resets each individual env when it finishes. By detaching the environment from a typical episodic structure, we can learn on long environments whose episodes cannot fit into memory completely.
-2. Architectures (DONE) - orthogonal weight inits and biases = 0, 3 linear layers (for cartpole only) and tanh hidden layers (for whatever reason...)
-3. Adam Optimizer (DONE) - adam_eps = 1e-5, rather than PyTorch default 1e-8
-4. Learning Rate Anneal (TODO) - reduce LR from full to 0 linearly
-5. General Advantage Evaluation (DONE)
-  - bootstrap when env is not done
-6. Minibatch update
-7. Advantage Normalization (DONE) - normalize advantage rather than return
-8. Clipped Objective (DONE)
-9. Value Loss Clipping (TODO) - but may make things worse
-10. Entropy Loss (DONE)
-11. Gradient Clipping (DONE)
-
-BONUS: early stopping: set target KL divergence threshold: end training when KL divergence >= threshold
+Uses PPO to distill Atari environments.
 """
 
 import os
@@ -38,8 +21,8 @@ from itertools import chain
 
 import higher
 
-from models.atari_models import Distiller, GTNGenerator, Actor, Critic, RLDataset, Encoder
-from envs import vector_env
+from atari_models import Distiller, Actor, Critic, RLDataset, Encoder
+import vector_env
 
 # Atari
 envs = ['MsPacmanNoFrameskip-v4', 'BreakoutNoFrameskip-v4', 'CentipedeNoFrameskip-v4', 'PongNoFrameskip-v4', 'SpaceInvadersNoFrameskip-v4', 'PongNoFrameskip-v4']
@@ -60,18 +43,14 @@ def main():
   parser.add_argument("-b", "--inner_batch", help="inner/generated batch size", type=int, default=512)
   parser.add_argument("-c", "--conditional", help="use conditional generation (labels not learned/generated)", action="store_true")
   parser.add_argument("-d", "--device", help="select device", choices=['cuda', 'cpu'])
-  parser.add_argument("-g", "--generator", help="use GTN generator rather than distiller", action="store_true")
   parser.add_argument("-i", "--inner_epochs", help="number of inner SGD steps, using distinct batches", type=int, default=1)
   parser.add_argument("-l", "--load", help="load model at provided epoch and continue learning from there", type=int)
   parser.add_argument("-p", "--policy_epochs", help="number of epochs per learning cycle", type=int, default=4)
   parser.add_argument("-s", "--static_initialization", help="reinitialize parameters to a static initialization every outer iteration", action="store_true")
   parser.add_argument("-t", "--state_initialization", help="load real states for initializing the distiller from this file")
-  parser.add_argument("-z", "--zlearning", help="learn z vector for GTN", action="store_true")
   parser.add_argument("--encoder", help="if non-zero, an encoding layer will be placed in front of the network and trained /w the distiller. Provide encoding size.", type=int, default=0)
-  parser.add_argument("--anneal_lr", help="reduce lr from max to 0 throughout learning", action="store_true")
   parser.add_argument("--load_from", help="load models from provided folder: will look for disiller_sd.pt and critic_sd.pt")
   parser.add_argument("--max_epochs", help="end after performing x epochs: negative values signify infinite loop", type=int, default=-1)
-  parser.add_argument("--simplify_states", help="FOR BREAKOUT: reduce final state size to 64 x 74 and quantize values.", action="store_true")
   parser.add_argument("--environment", help="Environment to be used, defaults to 'BreakoutNoFrameskip-v4'", default='BreakoutNoFrameskip-v4')
   parser.add_argument("result_dir", help="path to save results plots")
   args = parser.parse_args()
@@ -90,7 +69,7 @@ def main():
   results_path = args.result_dir
 
   # This env is created to get us the correct state and action space dimensions. A vectorized version is used in training.
-  env = vector_env._make_atari(env_name, args.simplify_states)()
+  env = vector_env._make_atari(env_name)()
 
   global n_actions
   n_actions = env.action_space.n
@@ -106,8 +85,6 @@ def main():
   use_consistent_setup = args.static_initialization
 
   ## GENERATOR MODES ##
-  use_gtn = args.generator
-  learn_z_vector = args.zlearning
   use_conditional_generation = args.conditional
 
   ## HYPERPARAMETERS ##
@@ -151,28 +128,17 @@ def main():
     
   inner_objective = nn.CrossEntropyLoss() if use_conditional_generation else nn.MSELoss()
 
-  env = vector_env.make_atari_vector_env(num_envs, env_name, args.simplify_states)
+  env = vector_env.make_atari_vector_env(num_envs, env_name)
 
   # Set up distiller
-  if use_gtn:
-    distiller = GTNGenerator(z_vector_size, inner_lr, None, conditional_generation=use_conditional_generation).to(device)
-    if learn_z_vector:
-      distiller.z = nn.Parameter(torch.randn((inner_batch_size, z_vector_size), device=device), True)
-  else:
-    distiller = Distiller(c, h, w, n_actions, inner_batch_size, inner_lr, None, conditional_generation=use_conditional_generation).to(device)
-    if args.state_initialization:
-      states = torch.load(args.state_initialization)
-      num_states = states.size(0)
-      selected_states = states[torch.multinomial(torch.ones(num_states), inner_batch_size, replacement=(num_states<inner_batch_size)), :]
-      if args.simplify_states:
-            # perform state simplification: cut and quantize
-            selected_states = selected_states[:,:,12:-6, 4:-4]
-#             wher = selected_states < .2
-#             selected_states[wher] = 0.
-#             selected_states[np.logical_not(wher)] = 1.
-      with torch.no_grad():
-        distiller.x.data = selected_states
-        distiller.to(device)
+  distiller = Distiller(c, h, w, n_actions, inner_batch_size, inner_lr, None, conditional_generation=use_conditional_generation).to(device)
+  if args.state_initialization:
+    states = torch.load(args.state_initialization)
+    num_states = states.size(0)
+    selected_states = states[torch.multinomial(torch.ones(num_states), inner_batch_size, replacement=(num_states<inner_batch_size)), :]
+    with torch.no_grad():
+      distiller.x.data = selected_states
+      distiller.to(device)
     
   # Set static targets when using conditional generation
   if use_conditional_generation:
@@ -186,13 +152,13 @@ def main():
     encoder = None
     outer_optimizer = optim.Adam(distiller.parameters(), lr=rl_lr, eps=adam_eps) 
     
-  critic = Critic(c, simplify=args.simplify_states).to(device)
+  critic = Critic(c).to(device)
     
   critic_optimizer = optim.Adam(critic.parameters(), lr=critic_lr, eps=adam_eps)
 
   if use_consistent_setup:
-    stable_init = Actor(c, n_actions, simplify=args.simplify_states)
-    actor = Actor(c, n_actions, simplify=args.simplify_states).to(device)
+    stable_init = Actor(c, n_actions)
+    actor = Actor(c, n_actions).to(device)
 
 
   # Rollout data structures: constant length based on number of steps and envs.
@@ -234,7 +200,7 @@ def main():
     if use_consistent_setup:
       actor.load_state_dict(stable_init.state_dict())
     else:
-      actor = Actor(c, n_actions, simplify=args.simplify_states).to(device)
+      actor = Actor(c, n_actions).to(device)
     
     init_sd = copy.deepcopy(actor.state_dict()) # this initialization will be used throughout this meta-epoch
     
@@ -265,28 +231,10 @@ def main():
         
           ### SUPERVISED INNER LEARNING ###
           for inner_epoch in range(inner_epochs):
-            if use_gtn:
-              # get latent vector z to generate labels
-              if learn_z_vector:
-                z = distiller.z
-                # if conditional_generation, y is also learned, so it won't be sampled here
-              else:
-                z = torch.randn((inner_batch_size, z_vector_size), device=device)
-                
-                if conditional_generation:
-                  actions_target = torch.randint(0, n_actions, (inner_batch_size,), device=device) # Generate one integer label between [0,n_actions) per generated instance.
-                  actions_target_one_hot = F.one_hot(actions_target, num_classes=n_actions)
-        
-            # Generate a batch of data instances (and labels if necessary)
-              if use_conditional_generation:
-                state = distiller(z, actions_target_one_hot)
-              else:
-                state, actions_target = distiller(z)
+            if use_conditional_generation:
+              state = distiller()
             else:
-              if use_conditional_generation:
-                state = distiller()
-              else:
-                state, actions_target = distiller()
+              state, actions_target = distiller()
                 
             # Use actor to predict the policy/action for a given state
             actions_prediction = h_actor(state)
@@ -302,8 +250,6 @@ def main():
           ### PPO OUTER TRAINING ###
           # Gather data with first net only!
           if gather_data:
-            memory = []
-            epoch_rewards = []
             rollout_rewards, last_state, last_done = perform_rollout(h_actor, critic, env, rollout, rollout_len, last_state)
             
             general_advantage_estimation(critic, rollout, last_state, last_done, gamma, gae_lambda)
@@ -316,11 +262,6 @@ def main():
             memory_iter = iter(memory_dataloader)
             transition = next(memory_iter)
             reset_iter = False
-    
-          # Anneal lr
-          if args.anneal_lr:
-            frac = 1.0 - (step - 1) / num_steps
-            outer_optimizer.param_groups[0]['lr'] = frac * rl_lr
     
           # Calculate and accumulate losses
           policy_loss, value_loss, entropy_loss = calculate_losses(h_actor, critic, transition, epsilon)

@@ -1,5 +1,5 @@
 """
-K-shot (1-shot?) learning validation using a fully-trained distiller.
+K-shot learning validation using a fully-trained distiller.
 The distiller will not be trained here; rather, it will be used to teach a variety of in-distribution models.
 """
 
@@ -13,14 +13,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-
 from torch.distributions.categorical import Categorical
-
 import gym
 
-from models.cartpole_validation_models import Distiller, Actor, Actor_Ortho1, Actor_XE, Actor_Variable
-from envs.nd_cartpole import NDCartPoleEnv
-from envs.vector_env import RewardTerminationWrapper
+from cartpole_validation_models import Distiller, Actor, Actor_Ortho1, Actor_XE, Actor_Variable
+from nd_cartpole import NDCartPoleEnv
+import vector_env
 
 # Cartpole
 
@@ -87,7 +85,7 @@ def main():
   if args.degrees_of_freedom <= 1:
     env = gym.make("CartPole-v1") 
   else:
-    env = RewardTerminationWrapper(NDCartPoleEnv(args.degrees_of_freedom), reward_threshold)
+    env = vector_env.RewardTerminationWrapper(NDCartPoleEnv(args.degrees_of_freedom), reward_threshold)
     STATE_SPACE  = 4*args.degrees_of_freedom
     ACTION_SPACE = 2*args.degrees_of_freedom
 
@@ -173,7 +171,7 @@ def act(actor, state):
     policy = actor(state)
     probs = Categorical(logits=policy)
     action = probs.sample()
-  return action#, probs.log_prob(action), probs.entropy(), value
+  return action
 
 if __name__ == '__main__':
   main()

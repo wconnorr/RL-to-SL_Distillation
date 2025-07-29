@@ -1,28 +1,12 @@
 """
-Enhancements:
-https://iclr-blog-track.github.io/2022/03/25/ppo-implementation-details/
-
-1. Vectorized Environment (DONE) - lets you step through multiple environments at once. Even if all envs are cartpole, this vectorization provides cheaper action selection (1 parallelized forward pass vs <episode> forward passes).
-  - VE resets each individual env when it finishes. By detaching the environment from a typical episodic structure, we can learn on long environments whose episodes cannot fit into memory completely.
-2. Architectures (DONE) - orthogonal weight inits and biases = 0, 3 linear layers (for cartpole only) and tanh hidden layers (for whatever reason...)
-3. Adam Optimizer (DONE) - adam_eps = 1e-5, rather than PyTorch default 1e-8
-4. Learning Rate Anneal (TODO) - reduce LR from full to 0 linearly
-5. General Advantage Evaluation (DONE)
-  - bootstrap when env is not done
-6. Minibatch update
-7. Advantage Normalization (DONE) - normalize advantage rather than return
-8. Clipped Objective (DONE)
-9. Value Loss Clipping (TODO) - but may make things worse
-10. Entropy Loss (DONE)
-11. Gradient Clipping (DONE)
-
-BONUS: early stopping: set target KL divergence threshold: end training when KL divergence >= threshold
+Distillation of ND cart-pole. Implements encoder and non-encoder distillation.
 """
 
 import os
 import copy
 import time
 import argparse
+import pickle as pkl
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -39,8 +23,8 @@ from itertools import chain
 
 import higher
 
-from models.cartpole_models import Distiller, GTNGenerator, Actor, Critic, RLDataset
-from envs import vector_env
+from cartpole_models import Distiller, Actor, Critic, RLDataset
+import vector_env
 
 # Cartpole
 
@@ -66,21 +50,22 @@ def main():
   parser.add_argument("-b", "--inner_batch", help="inner/generated batch size", type=int, default=512)
   parser.add_argument("-c", "--conditional", help="use conditional generation (labels not learned/generated)", action="store_true") # WORSE W/ CONDITIONAL!
   parser.add_argument("-d", "--device", help="select device", choices=['cuda', 'cpu'])
-  parser.add_argument("-g", "--generator", help="use GTN generator rather than distiller", action="store_true")
   parser.add_argument("-i", "--inner_epochs", help="number of inner SGD steps, using distinct batches", type=int, default=1)
-  parser.add_argument("-l", "--load_initial_state", help="load real states for initializing the distiller from this file")
+  parser.add_argument("-t", "--timer", help="time (in minutes) to checkpoint. DOES NOT TERMINATE (for slurm restarts it needs to be auto terminated)", type=int, default=1435)
+  parser.add_argument("-l", "--load_from", help="load models from provided folder: will look for disiller_sd.pt and critic_sd.pt")
+  parser.add_argument("--load_initial_state", help="load real states for initializing the distiller from this file")
   parser.add_argument("-p", "--policy_epochs", help="number of epochs per learning cycle", type=int, default=4)
   parser.add_argument("-s", "--static_initialization", help="reinitialize parameters to a static initialization every outer iteration", action="store_true")
-  parser.add_argument("-z", "--zlearning", help="learn z vector for GTN", action="store_true")
   parser.add_argument("-m", "--meta_epochs", help="number of outer-learning steps to train distiller", type=int, default=10000)
   parser.add_argument("--encoder", help="if non-zero, an encoding layer will be placed in front of the network and trained w/ the distiller. Provide encoding size.", type=int, default=0)
-  parser.add_argument("--anneal_lr", help="reduce lr from max to 0 throughout learning", action="store_true")
-  parser.add_argument("--load_from", help="load models from provided folder: will look for disiller_sd.pt and critic_sd.pt")
+  parser.add_argument("--degrees_of_freedom", help="degrees of freedom for nd cartpole environment. Standard (2d) cart pole has 1 degree of freedom. Value must be an integer > 0.", type=int, default=1)
   parser.add_argument("result_dir", help="path to save results plots")
   args = parser.parse_args()
   print("EXPERIMENT: ", args)
+
+  time_limit = args.timer * 60
     
-  global device
+  global device, STATE_SPACE, ACTION_SPACE
     
   if args.device:
     device = torch.device(args.device)
@@ -91,12 +76,9 @@ def main():
   results_path = args.result_dir
 
   ## RL MODES ##
-#   randomize_inner_architecture = args.randomize_inner_architecture
   use_consistent_setup = args.static_initialization
 
   ## GENERATOR MODES ##
-  use_gtn = args.generator
-  learn_z_vector = args.zlearning
   use_conditional_generation = args.conditional
 
   ## HYPERPARAMETERS ##
@@ -128,6 +110,10 @@ def main():
   inner_epochs = args.inner_epochs
   inner_batch_size = args.inner_batch
 
+
+  reward_threshold = 500 # max running reward
+
+
   ## LISTS FOR PERFORMANCE ANALYSIS ##
   # OUTER STATISTICS
   end_rewards = []
@@ -141,22 +127,22 @@ def main():
 
   inner_objective = nn.CrossEntropyLoss() if use_conditional_generation else nn.MSELoss()
 
-  env = vector_env.make_cartpole_vector_env(num_envs)
+  if args.degrees_of_freedom <= 1:
+    env = vector_env.make_cartpole_vector_env(num_envs)
+  else:
+    env = vector_env.make_ndcartpole_vector_env(num_envs, args.degrees_of_freedom, reward_threshold)
+    STATE_SPACE  = 4*args.degrees_of_freedom
+    ACTION_SPACE = 2*args.degrees_of_freedom
 
   # Set up distiller
-  if use_gtn:
-    distiller = GTNGenerator(z_vector_size, inner_lr, None, conditional_generation=use_conditional_generation).to(device)
-    if learn_z_vector:
-      distiller.z = nn.Parameter(torch.randn((inner_batch_size, z_vector_size), device=device), True)
-  else:
-    distiller = Distiller(inner_batch_size, STATE_SPACE, ACTION_SPACE, inner_lr, None, conditional_generation=use_conditional_generation).to(device)
-    if args.load_initial_state:
-        states = torch.load(args.load_initial_state)
-        num_states, _ = states.shape
-        selected_states = states[torch.multinomial(torch.ones(num_states), inner_batch_size, replacement=(num_states<inner_batch_size)), :]
-        with torch.no_grad():
-          distiller.x.data = selected_states
-          distiller.to(device)
+  distiller = Distiller(inner_batch_size, STATE_SPACE, ACTION_SPACE, inner_lr, None, conditional_generation=use_conditional_generation).to(device)
+  if args.load_initial_state:
+    states = torch.load(args.load_initial_state)
+    num_states, _ = states.shape
+    selected_states = states[torch.multinomial(torch.ones(num_states), inner_batch_size, replacement=(num_states<inner_batch_size)), :]
+    with torch.no_grad():
+      distiller.x.data = selected_states
+      distiller.to(device)
     
   # Set static targets when using conditional generation
   if use_conditional_generation:
@@ -170,13 +156,13 @@ def main():
     encoder = None
     outer_optimizer = optim.Adam(distiller.parameters(), lr=rl_lr, eps=adam_eps) 
     
-  critic = Critic(STATE_SPACE).to(device)
+  critic = Critic(state_size=STATE_SPACE).to(device)
     
   critic_optimizer = optim.Adam(critic.parameters(), lr=critic_lr, eps=adam_eps)
 
   if use_consistent_setup:
-    stable_init = Actor((STATE_SPACE if args.encoder <= 0 else args.encoder), ACTION_SPACE)
-    actor = Actor(STATE_SPACE, ACTION_SPACE).to(device)
+    stable_init = Actor(state_size=(STATE_SPACE if args.encoder <= 0 else args.encoder), action_size=ACTION_SPACE)
+    actor = Actor(state_size=(STATE_SPACE if args.encoder <= 0 else args.encoder), action_size=ACTION_SPACE).to(device)
 
 
   # Rollout data structures: constant length based on number of steps and envs.
@@ -200,11 +186,23 @@ def main():
   last_state, _ = env.reset()
   last_state = torch.from_numpy(last_state)
     
+  meta_epoch = 0
+
   if args.load_from:
     load(distiller, os.path.join(args.load_from, "distiller_sd.pt"))
     outer_optimizer = optim.Adam(distiller.parameters(), lr=rl_lr,     eps=adam_eps) 
-    load(critic,    os.path.join(args.load_from, "critic_sd.pt"      ))
+    load(outer_optimizer, os.path.join(args.load_from, "outer_optimizer_sd.pt"))
+    load(critic,    os.path.join(args.load_from, "critic_sd.pt"))
     critic_optimizer = optim.Adam(critic.parameters(),   lr=critic_lr, eps=adam_eps)
+    load(critic_optimizer, os.path.join(args.load_from, "critic_optimizer_sd.pt"))
+    with open(os.path.join(args.load_from, "reward.pkl"), 'rb') as f:
+      end_rewards = pkl.load(f)
+    with open(os.path.join(args.load_from, "etc.txt"), 'r') as f:
+      for line in f.readlines():
+        key, value = line.split(':')
+        if key == "Epoch":
+          meta_epoch = int(value)
+
   else:
     # Save initial state
     if not os.path.exists(os.path.join(results_path, "init")):
@@ -212,14 +210,13 @@ def main():
     torch.save(distiller.state_dict(), os.path.join(results_path, "init", "distiller_sd.pt"))
     torch.save(critic.state_dict(), os.path.join(results_path, "init", "critic_sd.pt"))
     
-    
-  for meta_epoch in range(num_meta_epochs):
+  while meta_epoch != num_meta_epochs:
     
     # Reinitialize inner network
     if use_consistent_setup:
       actor.load_state_dict(stable_init.state_dict())
     else:
-      actor = Actor((STATE_SPACE if args.encoder <= 0 else args.encoder), ACTION_SPACE).to(device)
+      actor = Actor(state_size=(STATE_SPACE if args.encoder <= 0 else args.encoder), action_size=ACTION_SPACE).to(device)
     
     init_sd = copy.deepcopy(actor.state_dict()) # this initialization will be used throughout this meta-epoch
     
@@ -250,28 +247,10 @@ def main():
         
           ### SUPERVISED INNER LEARNING ###
           for inner_epoch in range(inner_epochs):
-            if use_gtn:
-              # get latent vector z to generate labels
-              if learn_z_vector:
-                z = distiller.z
-                # if conditional_generation, y is also learned, so it won't be sampled here
-              else:
-                z = torch.randn((inner_batch_size, z_vector_size), device=device)
-                
-                if conditional_generation:
-                  actions_target = torch.randint(0, ACTION_SPACE, (inner_batch_size,), device=device) # Generate one integer label between [0,ACTION_SPACE) per generated instance.
-                  actions_target_one_hot = F.one_hot(actions_target, num_classes=ACTION_SPACE)
-        
-            # Generate a batch of data instances (and labels if necessary)
-              if use_conditional_generation:
-                state = distiller(z, actions_target_one_hot)
-              else:
-                state, actions_target = distiller(z)
+            if use_conditional_generation:
+              state = distiller()
             else:
-              if use_conditional_generation:
-                state = distiller()
-              else:
-                state, actions_target = distiller()
+              state, actions_target = distiller()
                 
             if encoder is not None:
               state = encoder(state)
@@ -306,11 +285,6 @@ def main():
             transition = next(memory_iter)
             reset_iter = False
     
-          # Anneal lr
-          if args.anneal_lr:
-            frac = 1.0 - (step - 1) / num_steps
-            outer_optimizer.param_groups[0]['lr'] = frac * rl_lr
-    
           # Calculate and accumulate losses
           policy_loss, value_loss, entropy_loss = calculate_losses(h_actor, critic, transition, epsilon, encoder=encoder)
           loss = policy_loss + value_coefficient * value_loss - entropy_coefficient * entropy_loss
@@ -331,15 +305,92 @@ def main():
             transition = next(memory_iter)
           except:
             epoch_done = True
-    
+
     if meta_epoch % 1000 == 999:
-      save(os.path.join(results_path, str(meta_epoch+1)), distiller.state_dict(), critic.state_dict(), end_rewards, policy_losses, value_losses, entropy_losses, inner_losses, inner_lrs)
+      graph(results_path, meta_epoch+1, end_rewards, policy_losses, value_losses, entropy_losses, inner_losses, inner_lrs)
+
+    if time.time() - begin > time_limit:
+      save_checkpoint(os.path.join(results_path, "checkpoint_final"), meta_epoch+1, end_rewards, distiller.state_dict(), critic.state_dict(), outer_optimizer.state_dict(), critic_optimizer.state_dict())
+      quit()
+    meta_epoch += 1
 
   with open(os.path.join(results_path, "etc.txt"), 'w') as f:
     f.write("CLOSED AFTER {} STEPS\n".format(step))
     f.write("TIME TAKEN: {} MINUTES\n".format((time.time()-begin)//60))
     
-def save(path, distiller_sd, critic_sd, rewards, policy_losses, value_losses, entropy_losses, inner_losses, inner_lrs):
+def graph(path, epoch, rewards, policy_losses, value_losses, entropy_losses, inner_losses, inner_lrs):
+    path = os.path.join(path, str(epoch))
+    if not os.path.exists(path):
+      os.makedirs(path)
+
+    fig = plt.figure()
+    plt.plot(rewards)
+    plt.plot([e for e in pd.Series.rolling(pd.Series(rewards), 10).mean()])
+    plt.plot([e for e in pd.Series.rolling(pd.Series(rewards), 100).mean()])
+    plt.xlabel("Episode")
+    plt.ylabel("Reward")
+    plt.title("Cumulative Rewards")
+    fig.savefig(os.path.join(path, "reward.png"), dpi=fig.dpi)
+
+    fig = plt.figure()
+    plt.plot(policy_losses)
+    plt.plot([e for e in pd.Series.rolling(pd.Series(policy_losses), 10).mean()])
+    plt.plot([e for e in pd.Series.rolling(pd.Series(policy_losses), 100).mean()])
+    plt.xlabel("Outer Optimization Step")
+    plt.ylabel("PPO Policy Loss")
+    plt.title("Outer Policy Losses")
+    fig.savefig(os.path.join(path, "outer_policy_loss.png"), dpi=fig.dpi)
+
+    fig = plt.figure()
+    plt.plot(value_losses)
+    plt.plot([e for e in pd.Series.rolling(pd.Series(value_losses), 10).mean()])
+    plt.plot([e for e in pd.Series.rolling(pd.Series(value_losses), 100).mean()])
+    plt.xlabel("Outer Optimization Step")
+    plt.ylabel("PPO Value Loss")
+    plt.title("Value Losses")
+    fig.savefig(os.path.join(path, "value_loss.png"), dpi=fig.dpi)
+
+    fig = plt.figure()
+    plt.plot(entropy_losses)
+    plt.plot([e for e in pd.Series.rolling(pd.Series(entropy_losses), 10).mean()])
+    plt.plot([e for e in pd.Series.rolling(pd.Series(entropy_losses), 100).mean()])
+    plt.xlabel("Outer Optimization Step")
+    plt.ylabel("Policy Entropy Loss")
+    plt.title("Entropy Losses")
+    fig.savefig(os.path.join(path, "entropy_loss.png"), dpi=fig.dpi)
+
+    fig = plt.figure()
+    plt.plot(inner_losses)
+    plt.plot([e for e in pd.Series.rolling(pd.Series(inner_losses), 10).mean()])
+    plt.plot([e for e in pd.Series.rolling(pd.Series(inner_losses), 100).mean()])
+    plt.xlabel("Outer Optimization Step")
+    plt.ylabel("Supervised Loss")
+    plt.title("Inner Losses")
+    fig.savefig(os.path.join(path, "inner_loss.png"), dpi=fig.dpi)
+
+    fig = plt.figure()
+    plt.plot(inner_lrs)
+    plt.xlabel("Outer Optimization Step")
+    plt.ylabel("SGD Learning Rate")
+    plt.title("Inner Supervised Learning Rate")
+    fig.savefig(os.path.join(path, "inner_lr.png"), dpi=fig.dpi)
+
+    plt.close('all')
+
+def save_checkpoint(path, epoch, rewards, distiller_sd, critic_sd, outer_optimizer_sd, critic_optimizer_sd):
+    if not os.path.exists(path):
+      os.makedirs(path)
+    torch.save(distiller_sd, os.path.join(path, "distiller_sd.pt"))
+    torch.save(outer_optimizer_sd, os.path.join(path, "outer_optimizer_sd.pt"))
+    torch.save(critic_sd, os.path.join(path, "critic_sd.pt"))
+    torch.save(critic_optimizer_sd, os.path.join(path, "critic_optimizer_sd.pt"))
+    with open(os.path.join(path, "reward.pkl"), 'wb') as f:
+      pkl.dump(rewards, f)
+    with open(os.path.join(path, "etc.txt"), 'w') as f:
+      f.write('Epoch:{}\n'.format(epoch))
+
+
+def save(path, distiller_sd, critic_sd, outer_optimizer_sd, critic_optimizer_sd, rewards, policy_losses, value_losses, entropy_losses, inner_losses, inner_lrs):
     if not os.path.exists(path):
       os.makedirs(path)
     
@@ -347,7 +398,9 @@ def save(path, distiller_sd, critic_sd, rewards, policy_losses, value_losses, en
     
     torch.save(distiller_sd, os.path.join(path, "distiller_sd.pt"))
     torch.save(critic_sd, os.path.join(path, "critic_sd.pt"))
-    
+    torch.save(outer_optimizer_sd, os.path.join(path, "outer_optimizer_sd.pt")) 
+    torch.save(critic_optimizer_sd, os.path.join(path, "critic_optimizer_sd.pt"))   
+
     fig = plt.figure()
     plt.plot(rewards)
     plt.plot([e for e in pd.Series.rolling(pd.Series(rewards), 10).mean()])
@@ -428,9 +481,9 @@ def calculate_losses(policy_network, value_network, transition, epsilon, encoder
   states, actions, prior_policy, _, _, _, returns, advantages, entropies = transition
 
   if encoder is None:
-    current_policy = policy_network(states)[F.one_hot(actions.long(), 2).bool()]
+    current_policy = policy_network(states)[F.one_hot(actions.long(), ACTION_SPACE).bool()]
   else:
-    current_policy = policy_network(encoder(states))[F.one_hot(actions.long(), 2).bool()]
+    current_policy = policy_network(encoder(states))[F.one_hot(actions.long(), ACTION_SPACE).bool()]
   current_values = value_network(states)
 
   # calculate ratio quicker this way, rather than softmaxing them both
@@ -454,6 +507,8 @@ def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state, encoder
     # TODO: Remove values if we don't need v^0 for advantage calculations
     states, actions, prior_policy, rewards, dones, values, _, _, entropies = rollout
 
+    _, num_envs, state_shape = states.shape
+
     # Episode loop
     for i in range(rollout_len):
       # Agent chooses action
@@ -463,7 +518,7 @@ def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state, encoder
       next_state, reward, done, _, info = vec_env.step(action.cpu().numpy())
 
       # Store step for learning
-      states[i] = state
+      states[i] = state.view(num_envs, state_shape)
       actions[i] = action
       prior_policy[i] = action_distribution
       rewards[i] = torch.from_numpy(reward)
@@ -475,7 +530,7 @@ def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state, encoder
       
       if isinstance(info, dict) and 'final_info' in info.keys():
         epis = [a for a in info['final_info'] if a is not None]
-       	for item in epis:
+        for item in epis:
           final_rewards.append(item['episode']['r'])
       else:
         for item in info:
