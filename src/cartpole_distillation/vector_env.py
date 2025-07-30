@@ -2,7 +2,7 @@
 Produces vectorized environments for both ND Cart-pole and Atari, allowing n parallel environments to be used in reinforcement learning.
 """
 
-import gym
+import gymnasium as gym
 
 from nd_cartpole import NDCartPoleEnv
 

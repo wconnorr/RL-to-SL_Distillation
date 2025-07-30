@@ -22,16 +22,32 @@ The cart-pole environment contains an N-dimensional extension of cart-pole in nd
 
 ### distilled_envs
 
-This folder contains the weights of the final distilled datasets. Note that some are stored as .pt files (PyTorch weights) and some are stored as .ckpt files (Lightning Fabric checkpoint dictionaries). Be sure to load them using the corresponding library.
+This folder contains the weights of the final distilled datasets. For each experiment, we have stored one of the distilled datasets, and where possible additional weights and information. Note that some are stored as .pt files (PyTorch weights) and some are stored as .ckpt files (Lightning Fabric checkpoint dictionaries). Be sure to load them using the corresponding library.
 
 The stored distilled datasets use the following naming scheme:
 - ND cart-pole - ND_cartpole/distiller_sd_\<DIMENSION\>dcp_b\<BATCH\>.pt, where DIMENSION is the N-dimensional cart-pole environment dimension, and BATCH is the number of distilled instances. Each environment has a distillation for 512 instances and one for the minimum-sized distillation. See Table 1 of the paper for results.
-- Atari - Atari/\<ENV_NAME\>/distiller_sd_\<env_name\>_<ENCODER_LEVEL>.pt OR Atari/\<ENV_NAME\>/state_\<env_name\>_<ENCODER_LEVEL>.ckpt, ENCODER_LEVEL is an integer \[1,4\] showing which layer the encoder/learner split is. See Section 5.1 of the paper for further details. These are only the minimum-sized distillations, recorded in Table 2 of the paper.
+- Atari - Atari/\<ENV_NAME\>/\<ENCODER_LEVEL\>/distiller_sd.pt OR Atari/\<ENV_NAME\>/\<ENCODER_LEVEL\>/state_\<env_name\>.ckpt, ENCODER_LEVEL is an integer \[1,4\] showing which layer the encoder/learner split is. See Section 5.1 of the paper for further details. These are only the minimum-sized distillations, recorded in Table 2 of the paper.
 - MuJoCo -  MuJoCo/\<env_name\>_b64_state.ckpt. See Table 4 of the paper for results.
 
-For any that have both a .pt and .ckpt file, the .ckpt was used in the final paper, while the .pt represents an earlier version.
+The torch files (.pt) contain ONLY the distiller parameters. Additionally, where possible, we have also stored the critic parameters, encoder parameters (for l=\[1,4\]), and the optimizer parameters, allowing experiments to continue where they left off.
+
+The checkpoint files are loaded in as dictionaries with the following keys. Unless stated otherwise, they contain the state dictionaries of the corresponding model or Adam optimizer.
+- distiller
+- critic
+- encoder (for l=\[1,4\], not full distillation)
+- outer_optimizer - state dict of the optimizer used to train the distiller
+- critic_optimizer
+- encoder_optimizer (if encoder exists)
+- epoch - integer representing the outer epoch this state was stored at
+- rewards (optional) - list of rewards achieved at the end of each episode throughout training. This was removed from longer experiments due to GitHub file size constraints.
 
 ---
+
+### Dependencies
+
+We provide the dependencies, including the specific versions we used to run the project in requirements.txt.
+
+You will also need to install MuJoCo and Atari environments in gymnasium to run the RL environments. The command `pip install gymnasium[mujoco]` can be used to install MuJoCo. Atari is a bit more complex - you'll need to install them from gymnasium, but you'll also need the ROMs from ALE.
 
 ### Citation
 

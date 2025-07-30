@@ -2,7 +2,7 @@
 Produces vectorized environments for both ND Cart-pole and Atari, allowing n parallel environments to be used in reinforcement learning.
 """
 
-import gym
+import gymnasium as gym
 
 def make_atari_vector_env(num_envs, envname):
   return gym.vector.SyncVectorEnv([
