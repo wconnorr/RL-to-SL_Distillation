@@ -39,9 +39,9 @@ class RewardTerminationWrapper(gym.Wrapper):
     self.env = env
     self.reward_cutoff = r
     self.running_reward = 0
-  def reset(self):
+  def reset(self, *args, **kwargs):
     self.running_reward = 0
-    return self.env.reset()
+    return self.env.reset(*args, **kwargs)
   def step(self, action):
     next_state, reward, done, t, info = self.env.step(action)
     self.running_reward += reward

@@ -298,8 +298,10 @@ def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state, action_
       # Env takes step based on action
       # We only clamp here (to create a valid action); we still use the out-of-range value for loss calculation
       # NOTE: Supposedly, using tanh and (as needed) scaling is better than clipping.
-      next_state, reward, done, _, info = vec_env.step(torch.clamp(action, action_min, action_max).cpu().numpy())
+      next_state, reward, term, trunc, info = vec_env.step(torch.clamp(action, action_min, action_max).cpu().numpy())
 
+      done = np.logical_or(term, trunc)
+        
       # Store step for learning
       states[i] = state
       actions[i] = action

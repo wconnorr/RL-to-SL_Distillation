@@ -67,7 +67,7 @@ def main():
   # Parser arguments
   parser = argparse.ArgumentParser()
   parser.add_argument("-b", "--inner_batch", help="inner/generated batch size", type=int, default=512)
-  parser.add_argument("-d", "--device", help="select device", choices=['cuda', 'cpu'])
+  parser.add_argument("-d", "--device", help="select device", choices=['cuda', 'cpu'], default='cpu')
   parser.add_argument("-i", "--inner_epochs", help="number of inner SGD steps, using distinct batches", type=int, default=1)
   parser.add_argument("-p", "--policy_epochs", help="number of epochs per learning cycle", type=int, default=4)
   parser.add_argument("-r", "--reset", help="at termination, auto-resets job IF SLURM reset is set", action="store_true")
@@ -495,8 +495,10 @@ def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state, action_
       action, action_distribution, entropy, value = act(agent, critic, state.to(device), encoder=encoder)
 
       # Env takes step based on action
-      next_state, reward, done, _, info = vec_env.step(torch.clamp(action, action_min, action_max).cpu().numpy())
+      next_state, reward, term, trunc, info = vec_env.step(torch.clamp(action, action_min, action_max).cpu().numpy())
 
+      done = np.logical_or(term, trunc)
+        
       # Store step for learning
       states[i] = state
       actions[i] = action

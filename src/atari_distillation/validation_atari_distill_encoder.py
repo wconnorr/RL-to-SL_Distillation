@@ -131,8 +131,9 @@ def main():
     done = False
     while not done:
       action = act(actor, torch.from_numpy(np.array(state)).unsqueeze(0).float().to(device), encoder)
-      state, reward, done, _, _ = env.step(action)
+      state, reward, term, trunc, _ = env.step(action)
       cumulative_reward += reward
+      done = term or trunc
     end_rewards.append(cumulative_reward)
   time_elapsed = time.time()-begin
   average_time = time_elapsed/int(args.trials)

@@ -7,6 +7,7 @@ import argparse
 
 import matplotlib.pyplot as plt
 import pandas as pd
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -59,7 +60,7 @@ def main():
   results_path = args.result_dir
 
 
-  env = vector_env._make_atari(env_name)()
+  env = vector_env.make_atari(env_name)
 
   global n_actions
   n_actions = env.action_space.n
@@ -285,8 +286,10 @@ def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state):
       action, action_distribution, entropy, value = act(agent, critic, state.to(device))
 
       # Env takes step based on action
-      next_state, reward, done, _, info = vec_env.step(action.cpu().numpy())
+      next_state, reward, term, trunc, info = vec_env.step(action.cpu().numpy())
 
+      done = np.logical_or(term, trunc)
+        
       # Store step for learning
       states[i] = state
       actions[i] = action
@@ -298,10 +301,10 @@ def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state):
     
       state = torch.from_numpy(next_state)
     
-      if isinstance(info, dict) and 'final_info' in info.keys():
-        epis = [a for a in info['final_info'] if a is not None]
-        for item in epis:
-          final_rewards.append(item['episode']['r'])
+      if isinstance(info, dict) and 'episode' in info.keys():
+        for r, finished in zip(info['episode']['r'], info['_episode']):
+          if finished:
+            final_rewards.append(int(r))
     
   return final_rewards, state, done # no need to return rollout, its updated in-place
 

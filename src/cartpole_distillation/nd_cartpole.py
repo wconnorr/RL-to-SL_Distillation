@@ -12,9 +12,9 @@ from typing import Optional, Union
 
 import numpy as np
 
-import gym
-from gym import logger, spaces
-from gym.envs.classic_control import utils
+import gymnasium as gym
+from gymnasium import logger, spaces
+from gymnasium.envs.classic_control import utils
 
 
 class NDCartPoleEnv(gym.Env[np.ndarray, Union[int, np.ndarray]]):

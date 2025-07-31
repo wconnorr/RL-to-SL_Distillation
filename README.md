@@ -47,7 +47,19 @@ The checkpoint files are loaded in as dictionaries with the following keys. Unle
 
 We provide the dependencies, including the specific versions we used to run the project in requirements.txt.
 
-You will also need to install MuJoCo and Atari environments in gymnasium to run the RL environments. The command `pip install gymnasium[mujoco]` can be used to install MuJoCo. Atari is a bit more complex - you'll need to install them from gymnasium, but you'll also need the ROMs from ALE.
+You will also need to install MuJoCo and Atari environments in gymnasium to run the RL environments. 
+
+#### Installing Mujoco
+Run `pip install gymnasium[mujoco]` after installing gymnasium.
+
+#### Installing Atari
+
+Atari is a bit more complex - you'll need to install them from gymnasium, but you'll also need the ROMs from ALE. Run:
+
+`pip install gymnasium[atari]`
+`pip install gymnasium[other]`
+
+When you first import src/atari_distillation/vector_env.py, it should download the ROMs. If not, you may need to follow ALE's documentation to install the ROMs separately. If you get an error preventing you from running the hash function (seems to be OS-dependent), you may need to edit ALE's library and change their use of the MD5 hash function by adding the parameter `usedforsecurity=False` to perform the hash without throwing an error.
 
 ### Citation
 

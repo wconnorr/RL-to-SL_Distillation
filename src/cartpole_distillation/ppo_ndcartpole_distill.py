@@ -515,7 +515,9 @@ def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state, encoder
       action, action_distribution, entropy, value = act(agent, critic, state.to(device), encoder=encoder)
 
       # Env takes step based on action
-      next_state, reward, done, _, info = vec_env.step(action.cpu().numpy())
+      next_state, reward, term, trunc, info = vec_env.step(action.cpu().numpy())
+
+      done = np.logical_or(term, trunc)
 
       # Store step for learning
       states[i] = state.view(num_envs, state_shape)
@@ -528,14 +530,10 @@ def perform_rollout(agent, critic, vec_env, rollout, rollout_len, state, encoder
     
       state = torch.from_numpy(next_state)
       
-      if isinstance(info, dict) and 'final_info' in info.keys():
-        epis = [a for a in info['final_info'] if a is not None]
-        for item in epis:
-          final_rewards.append(item['episode']['r'])
-      else:
-        for item in info:
-          if "episode" in item.keys():
-            final_rewards.append(item['episode']['r']) 
+      if isinstance(info, dict) and 'episode' in info.keys():
+        for r, finished in zip(info['episode']['r'], info['_episode']):
+          if finished:
+            final_rewards.append(int(r)) 
     
   return final_rewards, state, done # no need to return rollout, its updated in-place
 
