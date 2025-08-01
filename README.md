@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/641653727.svg)](https://doi.org/10.5281/zenodo.16658503)
+
 # RL-to-SL Distillation
 ## Distilling Reinforcement Learning into Single-Batch Datasets
 
